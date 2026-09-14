@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.38.2](https://github.com/future-agi/future-agi/compare/v1.38.1...v1.38.2) (2026-09-14)
+
+
+### Bug Fixes
+
+* **dashboards:** apply Dataset and Eval Source filters to eval metric charts ([40d950d](https://github.com/future-agi/future-agi/commit/40d950d25851b1c7286d3e8ae302d33699af0e4e))
+* **dashboards:** apply Dataset and Eval Source filters to eval metric charts (TH-7938) ([37d07d7](https://github.com/future-agi/future-agi/commit/37d07d766bac22afc8832854b72168b07460f440))
+* **dashboards:** apply Dataset and Eval Source filters to eval metric charts (TH-7938) ([09046a8](https://github.com/future-agi/future-agi/commit/09046a89d629226f35d9dbba9e0b00dcc3fc4e4e))
+* **evals:** preserve system eval binding config (TH-7897) ([2a7ced2](https://github.com/future-agi/future-agi/commit/2a7ced21559c242b6453420c549a274f8f09fb05))
+
 ## [1.38.1](https://github.com/future-agi/future-agi/compare/v1.38.0...v1.38.1) (2026-09-12)
 
 
