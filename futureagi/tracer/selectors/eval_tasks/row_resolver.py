@@ -641,12 +641,12 @@ def _continuous_classifier_budget_ms(
 ) -> tuple[int, int]:
     """Preflight one finite exact-classification envelope.
 
-    Continuous discovery is capped at 10k public candidates. A custom-attribute
+    Fast-path discovery is capped at 10k public candidates. A custom-attribute
     trace classifier may safely process only ten identities per statement, so
     a legitimate pass can require 1,000 fully bounded reads. Reserve transport
-    headroom separately from the 3 s server deadline and reject the complete
-    pass before its first query if it cannot fit the three-hour reconcile
-    activity. This changes only the physical query schedule, not membership.
+    headroom separately from the 3 s server deadline. The caller escalates a
+    validated candidate set exceeding this preflight to the shared workflow
+    budget, which measures actual queries and time without widening statements.
     """
 
     if candidate_count < 0 or classify_size < 1:
@@ -730,6 +730,7 @@ def _resolve_continuous_rows(
         ContinuousCandidateOverflow,
         ContinuousCandidateQueryCapExceeded,
         ContinuousCandidateReadError,
+        ContinuousWorkflowReadBudget,
         discover_continuous_candidates,
         sample_public_ids,
     )
@@ -760,20 +761,36 @@ def _resolve_continuous_rows(
         return ResolvedRowSet((), (), True)
     analytics = V2AnalyticsQueryService()
     try:
-        candidates = discover_continuous_candidates(
-            analytics,
-            project_id=str(task.project_id),
-            row_type=task.row_type,
-            filters=ui_filters,
-            floor=floor,
-            ceiling=frozen_ceiling,
-            salt=str(task.id),
-            sampling_rate=sampling_rate,
-            deadline_seconds=_EVAL_TASK_CONTINUOUS_DISCOVERY_SECONDS,
-            minimum_ceiling=(
-                floor + CONTINUOUS_MIN_PROOF_WINDOW if not full_state else None
-            ),
-        )
+        discovery_kwargs = {
+            "project_id": str(task.project_id),
+            "row_type": task.row_type,
+            "filters": ui_filters,
+            "floor": floor,
+            "ceiling": frozen_ceiling,
+            "salt": str(task.id),
+            "sampling_rate": sampling_rate,
+            "deadline_seconds": _EVAL_TASK_CONTINUOUS_DISCOVERY_SECONDS,
+        }
+        workflow_budget = None
+        try:
+            candidates = discover_continuous_candidates(
+                analytics,
+                **discovery_kwargs,
+                minimum_ceiling=(
+                    floor + CONTINUOUS_MIN_PROOF_WINDOW if not full_state else None
+                ),
+            )
+        except (ContinuousCandidateOverflow, ContinuousCandidateQueryCapExceeded):
+            # A small filtered result can still require reading a dense arrival
+            # window. Restart its complete proof with keyset pages under one
+            # background-workflow budget; never publish the fast path's prefix.
+            workflow_budget = ContinuousWorkflowReadBudget(
+                row_type=task.row_type,
+                deadline_seconds=_EVAL_TASK_WORKFLOW_EXACT_SECONDS,
+            )
+            candidates = discover_continuous_candidates(
+                analytics, **discovery_kwargs, workflow_budget=workflow_budget
+            )
         if not candidates.classifier_ids:
             return ResolvedRowSet(
                 candidates.public_ids,
@@ -828,12 +845,31 @@ def _resolve_continuous_rows(
             builder,
             maximum=classify_size,
         )
-        required_queries, classify_budget_ms = _continuous_classifier_budget_ms(
-            candidate_count=len(candidates.classifier_ids),
-            classify_size=classify_size,
-        )
+        if workflow_budget is None:
+            try:
+                required_queries, classify_budget_ms = _continuous_classifier_budget_ms(
+                    candidate_count=len(candidates.classifier_ids),
+                    classify_size=classify_size,
+                )
+                deadline = time.monotonic() + classify_budget_ms / 1_000
+            except EvalTaskSelectionRejected:
+                # Validated small classifier batches can exceed the fast
+                # preflight even when discovery itself fits. Keep its complete
+                # candidate proof and escalate classification as well.
+                workflow_budget = ContinuousWorkflowReadBudget(
+                    row_type=task.row_type,
+                    deadline_seconds=_EVAL_TASK_WORKFLOW_EXACT_SECONDS,
+                )
+                workflow_budget.record_rows(
+                    [{"id": value} for value in candidates.public_ids]
+                )
+        if workflow_budget is not None:
+            # Large scans consume actual bounded statements/time, sharing the
+            # discovery envelope instead of multiplying a worst-case timeout
+            # estimate by every candidate or resetting budgets for each page.
+            required_queries = ceil(len(candidates.classifier_ids) / classify_size)
+            deadline = workflow_budget.deadline
         classify_read_settings = _filter_classifier_read_settings(builder)
-        deadline = time.monotonic() + classify_budget_ms / 1_000
         matched: list[str] = []
         matched_rows: list[dict[str, Any]] = []
         executed_queries = 0
@@ -851,6 +887,8 @@ def _resolve_continuous_rows(
             )
             if not query:
                 raise EvalTaskSelectionRejected(_SAFE_UNSUPPORTED_FILTER_MESSAGE)
+            if workflow_budget is not None:
+                workflow_budget.timeout_ms()
             try:
                 result = analytics.execute_ch_query(
                     query,
@@ -875,6 +913,8 @@ def _resolve_continuous_rows(
                 "root_span_id" if task.row_type == RowType.VOICE_CALLS else key_field
             )
             result_rows = list(result.data or [])
+            if workflow_budget is not None:
+                workflow_budget.record_rows(result_rows)
             matched_rows.extend(result_rows)
             matched.extend(
                 str(row[result_key])
@@ -887,12 +927,18 @@ def _resolve_continuous_rows(
 
         matched_ids = tuple(sorted(dict.fromkeys(matched)))
         if task.row_type == RowType.VOICE_CALLS:
+            sample_kwargs = (
+                {"workflow_budget": workflow_budget}
+                if workflow_budget is not None
+                else {}
+            )
             matched_ids = sample_public_ids(
                 analytics,
                 matched_ids,
                 salt=str(task.id),
                 sampling_rate=sampling_rate,
                 deadline_seconds=_EVAL_TASK_CONTINUOUS_SAMPLING_SECONDS,
+                **sample_kwargs,
             )
         # A classifier may only admit public identities proved by C. This also
         # fences malformed/multi-root output before reconciliation can write.
