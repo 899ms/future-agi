@@ -1001,11 +1001,6 @@ def _resolve_bounded_historical_span_ids(
         row_type=row_type,
         bounded_trace_root=True,
     )
-    time_columns = {"created_at", "start_time"}
-    has_time_filter = any(
-        (item.get("column_id") or item.get("columnId")) in time_columns
-        for item in ui_filters
-    )
     annotation_label_ids = _annotation_label_ids_for_filters(
         str(project_id), ui_filters
     )
@@ -1073,25 +1068,22 @@ def _resolve_bounded_historical_span_ids(
         raise EvalTaskSelectionRejected(_SAFE_UNSUPPORTED_FILTER_MESSAGE)
     if start_date >= end_date:
         return resolved_result(())
-    if not has_time_filter:
-        # BaseQueryBuilder's default window is relative to ``utcnow()``. Pin
-        # that one resolved window before adjacent seed pages are built;
-        # otherwise every builder call advances the lower bound by a few
-        # microseconds and the final slice can fall just outside its own
-        # request window.
-        ui_filters = [
-            *ui_filters,
-            {
-                "column_id": "created_at",
-                "filter_config": {
-                    "filter_type": "datetime",
-                    "filter_op": "between",
-                    "filter_value": [start_date, end_date],
-                },
+    # Missing bounds are relative to utcnow(), including one-sided and
+    # complement filters. Freeze both edges for every builder call and any
+    # workflow escalation, retaining the original predicates and exclusions.
+    ui_filters = [
+        *ui_filters,
+        {
+            "column_id": "created_at",
+            "filter_config": {
+                "filter_type": "datetime",
+                "filter_op": "between",
+                "filter_value": [start_date, end_date],
             },
-        ]
-        builder.filters = ui_filters
-        builder_kwargs["filters"] = ui_filters
+        },
+    ]
+    builder.filters = ui_filters
+    builder_kwargs["filters"] = ui_filters
 
     classify_batch_size = _recommended_filter_classify_batch_size(
         builder,
@@ -1279,7 +1271,7 @@ def _resolve_bounded_historical_span_ids(
             project_id=project_id,
             salt=salt,
             sampling_rate=sampling_rate,
-            filters=filters,
+            filters={**(filters or {}), "date_range": [start_date, end_date]},
             limit=limit,
             batch_size=batch_size,
             row_type=row_type,
