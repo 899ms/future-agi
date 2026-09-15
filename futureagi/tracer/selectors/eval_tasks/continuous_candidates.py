@@ -14,7 +14,7 @@ under a shared deadline/cap before it is returned.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Hashable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Sequence, Sized
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, TypeVar
@@ -86,7 +86,7 @@ class ContinuousCandidates:
 class _ReadBudget:
     deadline: float
     attempts: int = 0
-    workflow_row_type: str | None = None
+    workflow_row_type: RowType | None = None
     result_bytes: int = 0
 
     def timeout_ms(self) -> int:
@@ -121,7 +121,7 @@ class ContinuousWorkflowReadBudget(_ReadBudget):
     def __init__(self, *, row_type: str, deadline_seconds: float) -> None:
         super().__init__(
             time.monotonic() + deadline_seconds,
-            workflow_row_type=row_type,
+            workflow_row_type=RowType(row_type),
         )
 
 
@@ -414,7 +414,9 @@ def sample_public_ids(
     )
 
 
-def _execute(analytics, query: str, params: dict[str, Any], budget: _ReadBudget):
+def _execute(
+    analytics, query: str, params: dict[str, Any], budget: _ReadBudget
+) -> list[dict[str, Any]]:
     try:
         result = analytics.execute_ch_query(
             query,
@@ -437,28 +439,6 @@ def _execute(analytics, query: str, params: dict[str, Any], budget: _ReadBudget)
     return rows
 
 
-def _candidate_relation_projection(budget: _ReadBudget) -> str:
-    """Keep only the public identity needed by this task during a dense scan.
-
-    Collapsing at SQL projection keeps one trace with many changed spans from
-    consuming the result buffer. Session tasks retain all physical versions'
-    session aliases through the identity expansion below.
-    """
-    row_type = budget.workflow_row_type
-    trace = (
-        "trace_id"
-        if row_type in (None, RowType.TRACES, RowType.VOICE_CALLS)
-        else "'' AS trace_id"
-    )
-    span = "id" if row_type in (None, RowType.SPANS) else "'' AS id"
-    session = (
-        "toString(ifNull(trace_session_id, toUUID(%(nil_uuid)s))) AS session_id"
-        if row_type in (None, RowType.SESSIONS)
-        else "'' AS session_id"
-    )
-    return f"{trace}, {span}, {session}"
-
-
 def _candidate_pages(
     analytics: Any,
     query: str,
@@ -473,6 +453,7 @@ def _candidate_pages(
     the keyset includes every projected identity field, including timestamp
     ties. Never use an offset or return a capped prefix as a complete result.
     """
+    order_by = ", ".join(keys)
     after = None
     while True:
         page_params = {**params, "candidate_limit": _WORKFLOW_PAGE_SIZE}
@@ -480,7 +461,7 @@ def _candidate_pages(
         if after is not None:
             # A driver-bound one-element tuple renders as ('value'), which
             # ClickHouse treats as a scalar. Compare scalar keys directly.
-            key_expression = keys[0] if len(keys) == 1 else f"tuple({', '.join(keys)})"
+            key_expression = keys[0] if len(keys) == 1 else f"tuple({order_by})"
             page_params["candidate_after"] = after[0] if len(keys) == 1 else after
             keyset = f"WHERE {key_expression} > %(candidate_after)s"
         page = _execute(
@@ -488,7 +469,7 @@ def _candidate_pages(
             f"""
             SELECT * FROM ({query}) AS candidate_page
             {keyset}
-            ORDER BY {', '.join(keys)}
+            ORDER BY {order_by}
             LIMIT %(candidate_limit)s
             """,
             page_params,
@@ -562,7 +543,11 @@ def _read_workflow_changed_spans(
     if budget.workflow_row_type != RowType.SESSIONS:
         rows = _read_candidate_rows(
             analytics,
-            f"SELECT DISTINCT {_candidate_relation_projection(budget)} {source}",
+            f"""
+            SELECT trace_id, id,
+                toString(ifNull(trace_session_id, toUUID(%(nil_uuid)s))) AS session_id
+            {source}
+            """,
             params,
             budget,
             keys=("trace_id", "id", "session_id"),
@@ -679,10 +664,7 @@ def _read_candidate_batches(
             pending.extend((batch[midpoint:], batch[:midpoint]))
             continue
         affected.update(dict.fromkeys(rows))
-        if (budget is None or budget.workflow_row_type is None) and len(
-            affected
-        ) > _MAX_PUBLIC_CANDIDATES:
-            raise ContinuousCandidateOverflow("continuous candidate cap exceeded")
+        _raise_if_overflow(affected, budget=budget)
     return list(affected)
 
 
@@ -1305,16 +1287,11 @@ def _has_end_user_filter(filters: list[dict[str, Any]]) -> bool:
 
 def _bounded_unique(values, *, budget: _ReadBudget | None = None) -> tuple[str, ...]:
     unique = tuple(sorted(dict.fromkeys(str(value) for value in values if value)))
-    if (budget is None or budget.workflow_row_type is None) and len(
-        unique
-    ) > _MAX_PUBLIC_CANDIDATES:
-        raise ContinuousCandidateOverflow("continuous candidate cap exceeded")
+    _raise_if_overflow(unique, budget=budget)
     return unique
 
 
-def _raise_if_overflow(
-    rows: list[dict[str, Any]], *, budget: _ReadBudget | None = None
-) -> None:
+def _raise_if_overflow(rows: Sized, *, budget: _ReadBudget | None = None) -> None:
     if (budget is None or budget.workflow_row_type is None) and len(
         rows
     ) > _MAX_PUBLIC_CANDIDATES:
