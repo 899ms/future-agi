@@ -50,9 +50,10 @@ def reconcile(task: EvalTask) -> ReconcileResult:
 
     Creates missing pending entries (streamed), re-queues in-scope entries whose
     eval config changed (stale hash) plus errored / skipped entries whose row
-    changed in a continuous delta, and drops out-of-scope *pending* entries
-    while keeping out-of-scope *completed* results (paid data). For continuous
-    tasks, advances the forward cursor so the next pass scans only the new tail.
+    is proven to have changed since they last ran, and drops out-of-scope
+    *pending* entries while keeping out-of-scope *completed* results (paid
+    data). For continuous tasks, advances the forward cursor so the next pass
+    scans only the new tail.
     """
     if isinstance(task, EvalTask):
         # Callers may retain the model instance across passes while the previous
@@ -175,6 +176,11 @@ def _requeue_and_drop(
     requeue_by_cfg: dict[object, list] = defaultdict(list)
     drop_ids: list = []
     full_state = resolved.full_state
+    # Floor of the arrival/change window this delta proved — the resolver's
+    # ``_continuous_floor``, read before ``_advance_continuous_cursor`` moves
+    # it on. Candidacy alone only places a row inside that window; the floor is
+    # what turns it into a statement about *when* the row changed.
+    window_floor = getattr(task, "continuous_cursor", None)
     # Stream the live entries — we only collect ids, never hold all objects.
     for entry in EvalLogger.objects.filter(eval_task_id=str(task.id)).iterator():
         cfg_id = entry.custom_eval_config_id
@@ -204,10 +210,34 @@ def _requeue_and_drop(
             # same row it will fail the same way, so re-running it every pass
             # only burns evaluations (and media downloads) forever. Retry only
             # when something that can change the outcome changed — the eval
-            # config (stale hash) or, on a continuous delta, the row itself
-            # (it is a candidate of this arrival/change window).
+            # config (stale hash) or, on a continuous delta, the row itself.
+            #
+            # Candidacy is NOT that proof on its own. The cursor is parked an
+            # overlap behind the ceiling, so every pass re-admits the same
+            # unchanged rows for the whole overlap window and a converged
+            # failure would be re-run on each poll until it aged out of it.
+            # The watermark that closes the gap is ``entry.updated_at``, which
+            # ``mark_terminal`` / the reaper stamp at the moment the entry
+            # reached its terminal state. A candidate's change version lies in
+            # ``[window_floor, ceiling)``; so when the entry terminalized
+            # *before* ``window_floor`` that version is necessarily newer than
+            # the state the entry was evaluated against — a real change. When
+            # the entry terminalized at or after the floor we cannot separate a
+            # change from the overlap re-read, so it stays terminal.
+            #
+            # This still converges on a genuine change: the floor advances
+            # every pass, so it crosses the entry's terminal stamp within one
+            # overlap and the retry fires then. The retry's own ``mark_terminal``
+            # re-stamps ``updated_at`` past the row's version, so a row that did
+            # not change again cannot fire a second time.
             stale = bool(entry.config_hash) and entry.config_hash != hashes[cfg_id]
-            row_changed = not full_state and identity in candidates
+            row_changed = (
+                not full_state
+                and identity in candidates
+                and window_floor is not None
+                and entry.updated_at is not None
+                and entry.updated_at < window_floor
+            )
             if stale or row_changed:
                 requeue_by_cfg[cfg_id].append(entry.id)
         elif (

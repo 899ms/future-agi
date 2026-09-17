@@ -324,19 +324,35 @@ class TestEvalChanges:
     def test_skipped_entry_requeued_when_its_row_changed_in_delta_pass(
         self, project, custom_eval_config
     ):
-        # A continuous delta names the rows that changed in the arrival window
-        # (candidates). A skipped entry whose row changed may now have the
-        # attribute it lacked, so it gets exactly one more attempt; skipped
-        # entries whose row did not change stay put.
+        # A continuous delta names the rows in the arrival window (candidates).
+        # Candidacy alone is not proof of change — the entry must also have
+        # terminalized *before* the window floor, which places the row's change
+        # version after the state the entry was evaluated against. Here the
+        # skipped entry is stamped before the floor, so it gets exactly one more
+        # attempt; the other two, stamped after the floor, stay put.
+        t = timezone.now()
         spans = _make_spans(project, 3)
         task = _task(project, evals=[custom_eval_config])
         reconcile(task)
         _mark(task, EvalEntryStatus.SKIPPED)
+        floor = t - timedelta(minutes=5)
+        EvalTask.objects.filter(id=task.id).update(
+            run_type=RunType.CONTINUOUS, continuous_cursor=floor
+        )
+        task.refresh_from_db()
         changed = spans[0].id
+        # Stale stamp = terminalized before the floor; fresh = after it.
+        _live(task, observation_span_id=changed).update(
+            updated_at=floor - timedelta(minutes=1)
+        )
+        _live(task).exclude(observation_span_id=changed).update(
+            updated_at=floor + timedelta(minutes=1)
+        )
         requeued, dropped = _requeue_and_drop(
             task,
             resolved=ResolvedRowSet(
-                candidate_ids=(changed,),
+                # All three are candidates: the overlap re-reads them all.
+                candidate_ids=tuple(s.id for s in spans),
                 matched_ids=tuple(s.id for s in spans),
                 full_state=False,
             ),
@@ -347,6 +363,94 @@ class TestEvalChanges:
                 "observation_span_id", flat=True
             )
         ) == [changed]
+
+    def test_unchanged_candidate_stays_terminal_across_consecutive_polls(
+        self, project, custom_eval_config
+    ):
+        # Regression for the overlap re-read. The cursor is parked an overlap
+        # behind the ceiling, so a row that arrived inside that window is a
+        # candidate on *every* poll while it ages out — candidacy alone would
+        # re-run an errored entry (and re-download its media) on each one.
+        # Consecutive delta passes over the same unchanged candidates must
+        # requeue nothing, even as the floor advances underneath them.
+        t = timezone.now()
+        spans = _make_spans(project, 3)
+        task = _task(project, evals=[custom_eval_config])
+        reconcile(task)
+        _mark(task, EvalEntryStatus.ERRORED)
+        EvalTask.objects.filter(id=task.id).update(
+            run_type=RunType.CONTINUOUS,
+            # A task older than the overlap, so the start floor does not clamp
+            # the parked cursor (see _advance_continuous_cursor).
+            start_time=t - timedelta(minutes=60),
+            continuous_cursor=t - _CONTINUOUS_CURSOR_OVERLAP,
+        )
+        task.refresh_from_db()
+        # The entries terminalized just now — after the parked floor, as they
+        # always are while their row is still inside the overlap.
+        _live(task).update(updated_at=t)
+        delta = ResolvedRowSet(
+            candidate_ids=tuple(s.id for s in spans),
+            matched_ids=tuple(s.id for s in spans),
+            full_state=False,
+        )
+
+        # Three polls a minute apart: the floor walks forward each time and
+        # stays behind the terminal stamps, so nothing is re-run.
+        for minute in range(1, 4):
+            assert _requeue_and_drop(task, resolved=delta) == (0, 0)
+            _advance_continuous_cursor(task, t + timedelta(minutes=minute))
+            task.refresh_from_db()
+
+        assert _live(task, status=EvalEntryStatus.ERRORED).count() == 3
+        assert _live(task, status=EvalEntryStatus.PENDING).count() == 0
+
+    def test_errored_entry_retried_once_when_floor_passes_its_terminal_stamp(
+        self, project, custom_eval_config
+    ):
+        # The other half of the watermark: converged does not mean frozen. Once
+        # the floor has moved past the entry's terminal stamp, a row that is
+        # still a candidate must have changed after the entry ran, so it earns
+        # exactly one retry — and its new stamp closes the window again.
+        t = timezone.now()
+        spans = _make_spans(project, 2)
+        task = _task(project, evals=[custom_eval_config])
+        reconcile(task)
+        _mark(task, EvalEntryStatus.ERRORED)
+        EvalTask.objects.filter(id=task.id).update(
+            run_type=RunType.CONTINUOUS,
+            start_time=t - timedelta(minutes=60),
+            continuous_cursor=t - timedelta(minutes=10),
+        )
+        task.refresh_from_db()
+        stamped_at = t - timedelta(minutes=8)
+        _live(task).update(updated_at=stamped_at)
+        changed = spans[0].id
+        delta = ResolvedRowSet(
+            # Only one row is still in the arrival/change window.
+            candidate_ids=(changed,),
+            matched_ids=tuple(s.id for s in spans),
+            full_state=False,
+        )
+
+        # Floor now sits after the terminal stamp -> the candidate changed.
+        EvalTask.objects.filter(id=task.id).update(
+            continuous_cursor=t - timedelta(minutes=5)
+        )
+        task.refresh_from_db()
+        assert _requeue_and_drop(task, resolved=delta) == (1, 0)
+        assert list(
+            _live(task, status=EvalEntryStatus.PENDING).values_list(
+                "observation_span_id", flat=True
+            )
+        ) == [changed]
+
+        # The retry runs and re-stamps the entry (what mark_terminal does);
+        # the same candidate must not fire again on the next poll.
+        _live(task, observation_span_id=changed).update(
+            status=EvalEntryStatus.ERRORED, updated_at=t
+        )
+        assert _requeue_and_drop(task, resolved=delta) == (0, 0)
 
 
 @pytest.mark.integration

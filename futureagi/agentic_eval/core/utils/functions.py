@@ -55,6 +55,27 @@ _MEDIA_DOWNLOAD_TIMEOUT_SECONDS = 30
 _URL_SNIFF_BYTES = 8192
 
 
+def _read_sniff_prefix(response, limit: int = _URL_SNIFF_BYTES) -> bytes:
+    """Return the first ``limit`` bytes of a streamed response.
+
+    ``iter_content`` yields transport chunks of *at most* ``chunk_size``: a
+    chunked or content-encoded body can hand back a few bytes at a time, so
+    reading a single yield would leave ``filetype`` sniffing a fragmented
+    magic header (and silently falling through to ``Content-Type``, which is
+    generic or absent on plenty of buckets). Accumulate through the budget,
+    stopping at ``limit`` bytes or EOF — whichever comes first — so this still
+    never pulls the whole object.
+    """
+    buffer = bytearray()
+    for chunk in response.iter_content(chunk_size=limit):
+        if not chunk:
+            continue
+        buffer.extend(chunk)
+        if len(buffer) >= limit:
+            break
+    return bytes(buffer[:limit])
+
+
 def encode_image(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode("utf-8")
@@ -512,9 +533,7 @@ def detect_input_type(input_item: Any) -> dict:
                 # type (the actual media fetch happens later, once).
                 with requests.get(item, timeout=100, stream=True) as response:
                     if response.status_code == 200:
-                        content = next(
-                            response.iter_content(chunk_size=_URL_SNIFF_BYTES), b""
-                        )
+                        content = _read_sniff_prefix(response)
                         kind = filetype.guess(content)
                         header_type = response.headers.get('Content-Type', '').lower()
 
