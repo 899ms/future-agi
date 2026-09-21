@@ -184,6 +184,17 @@ def _annotate_tag_group(queryset, group_by):
     )
 
 
+def _group_name(row, group_by):
+    """Display name of a grouped row; a missing value reads as unknown."""
+    return str(row[group_by] or UNKNOWN_GROUP)
+
+
+def _folds_into_other(name):
+    """A caller's own group named Other joins the fold bucket, so one name never
+    becomes two series with the same key."""
+    return name == OTHER_GROUP
+
+
 def _fold_small_usage_groups(rows, group_by):
     """Keep the MAX_USAGE_TAG_GROUPS busiest groups; sum the rest per bucket."""
     totals = defaultdict(int)
@@ -192,7 +203,12 @@ def _fold_small_usage_groups(rows, group_by):
     if len(totals) <= MAX_USAGE_TAG_GROUPS:
         return rows
 
-    kept = set(sorted(totals, key=totals.get, reverse=True)[:MAX_USAGE_TAG_GROUPS])
+    ranked = sorted(totals, key=totals.get, reverse=True)
+    kept = set(
+        [name for name in ranked if not _folds_into_other(name)][
+            :MAX_USAGE_TAG_GROUPS
+        ]
+    )
     folded, other = [], {}
     for row in rows:
         if row[group_by] in kept:
@@ -483,8 +499,12 @@ def get_cost_breakdown(queryset, period_start, period_end, group_by="model", top
         .order_by("-total_cost")
     )
 
-    top_rows = all_rows[:top_n]
-    remaining_rows = all_rows[top_n:]
+    top_rows, remaining_rows = [], []
+    for row in all_rows:
+        keeps_own_row = len(top_rows) < top_n and not _folds_into_other(
+            _group_name(row, group_by)
+        )
+        (top_rows if keeps_own_row else remaining_rows).append(row)
 
     breakdown = []
     for row in top_rows:
@@ -495,7 +515,7 @@ def get_cost_breakdown(queryset, period_start, period_end, group_by="model", top
 
         breakdown.append(
             {
-                "name": str(row[group_by] or UNKNOWN_GROUP),
+                "name": _group_name(row, group_by),
                 "total_cost": str(cost),
                 "percentage": round(pct, 2),
                 "request_count": count,
@@ -682,7 +702,7 @@ def get_error_breakdown(
 
     breakdown = []
     for row in breakdown_rows:
-        name = str(row[group_field] or UNKNOWN_GROUP)
+        name = _group_name(row, group_field)
         error_count = row["error_count"]
         pct_of_errors = (error_count / total_errors * 100) if total_errors > 0 else 0.0
         err_rate = (error_count / total_requests * 100) if total_requests > 0 else 0.0

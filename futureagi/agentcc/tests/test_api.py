@@ -2563,6 +2563,58 @@ class TestAnalyticsTagGroupBy:
         }
         assert totals == {"checkout": 2, "Other": 2}
 
+    def test_usage_other_application_never_splits_into_two_series(
+        self, auth_client, organization, workspace, tagged_logs, monkeypatch
+    ):
+        for index in range(3):
+            AgentccRequestLog.objects.create(
+                organization=organization,
+                workspace=workspace,
+                request_id=f"tag-other-{index}",
+                started_at=timezone.now(),
+                latency_ms=100,
+                metadata={"application": "Other"},
+            )
+        monkeypatch.setattr(analytics_service, "MAX_USAGE_TAG_GROUPS", 2)
+
+        response = auth_client.get(
+            "/agentcc/analytics/usage-timeseries/?group_by=application"
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        groups = response.json()["result"]["groups"]
+        totals = {
+            name: sum(point["request_count"] for point in points)
+            for name, points in groups.items()
+        }
+        assert totals == {"checkout": 2, "search": 1, "Other": 4}
+        buckets = [point["bucket"] for point in groups["Other"]]
+        assert len(buckets) == len(set(buckets))
+
+    def test_cost_other_application_never_splits_into_two_rows(
+        self, auth_client, organization, workspace, tagged_logs
+    ):
+        for index in range(3):
+            AgentccRequestLog.objects.create(
+                organization=organization,
+                workspace=workspace,
+                request_id=f"cost-other-{index}",
+                started_at=timezone.now(),
+                cost=Decimal("0.001000"),
+                metadata={"application": "Other"},
+            )
+
+        response = auth_client.get(
+            "/agentcc/analytics/cost-breakdown/?group_by=application&top_n=2"
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        breakdown = response.json()["result"]["breakdown"]
+        names = [row["name"] for row in breakdown]
+        assert len(names) == len(set(names))
+        counts = {row["name"]: row["request_count"] for row in breakdown}
+        assert counts == {"checkout": 2, "search": 1, "Other": 4}
+
     def test_empty_application_groups_as_unknown(
         self, auth_client, organization, workspace, tagged_logs
     ):
