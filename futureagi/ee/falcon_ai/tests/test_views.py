@@ -592,6 +592,7 @@ class TestSkillListView:
     URL = "/falcon-ai/skills/"
 
     def test_create_rejects_unknown_fields(self, auth_client):
+        existing_skills = Skill.objects.count()
         resp = auth_client.post(
             self.URL,
             {
@@ -605,4 +606,4 @@ class TestSkillListView:
         )
 
         assert resp.status_code == 400
-        assert Skill.objects.count() == 0
+        assert Skill.objects.count() == existing_skills
