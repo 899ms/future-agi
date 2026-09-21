@@ -81,20 +81,20 @@
 ### GW-E2E-001 — gateway traffic is filtered by the application that sent it
 
 **Goal:** A platform engineer finds the gateway requests one application made, out of everything the org sent  
-**Spec:** `flows/gateway/request-log-tags.spec.ts:35`  
+**Spec:** `flows/gateway/request-log-tags.spec.ts:44`  
 **Tags:** —
 
 **User steps:**
 
 1. mint a gateway API key from the app
-2. send three chat completions through the gateway, each tagged with an application, a service and a team
+2. deliver three gateway requests on the logs webhook, each tagged with an application, a service and a team
 3. open Request Logs
 4. pick one application in the Filters panel and apply it
 5. read the filtered table
 
 **Backend state verified:**
 
-- each call stored in PG agentcc_request_log with the caller metadata the gateway received
+- each request stored in PG agentcc_request_log under the key's org with the caller metadata the gateway parsed
 - the list endpoint returns only the rows of the filtered application
 - two applications in one filter return both, a service filter and a team tag filter narrow the same way
 - metadata-values offers exactly the two applications the org sent

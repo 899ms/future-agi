@@ -4,16 +4,25 @@ import { POLL } from '../../lib/state-probe';
 import { E2E } from '../../lib/env';
 import { flowAnnotation } from '../../lib/flow-meta';
 
-// Pinned off the running system: the header the gateway reads caller metadata
-// from (applyCallerMetadata in agentcc-gateway/internal/server/handlers.go), the
+// Pinned off the running system: the endpoint the gateway flushes its request
+// logs to and the secret it signs them with (FormatLogsWebhookURL in
+// agentcc-gateway/internal/plugins/logging/flusher.go, GatewayWebhookView), the
 // list endpoint the Request Logs table calls, the picker's placeholder, and the
 // Application column's place in that table (RequestTable.jsx COLUMNS).
-const METADATA_HEADER = 'x-agentcc-metadata';
+//
+// The traffic is delivered on that webhook rather than by calling the gateway
+// itself: a key minted by an org may only use providers the org configured
+// (resolveProvider in agentcc-gateway/internal/server/handlers.go rejects a
+// non-internal key on a globally configured provider), and this stack's only
+// provider is the shared mock. The webhook is the same entry point the gateway
+// posts to, carrying the caller metadata it parsed off `x-agentcc-metadata`.
+const LOGS_WEBHOOK_PATH = '/agentcc/webhook/logs/';
+const WEBHOOK_SECRET =
+  process.env.AGENTCC_WEBHOOK_SECRET || 'e2e-agentcc-webhook-secret';
 const REQUEST_LOGS_PATH = '/agentcc/request-logs/';
 const APPLICATION_PLACEHOLDER = 'Select applications...';
 const APPLICATION_CELL = 'tbody tr td:nth-child(4)';
-// The gateway buffers request logs and POSTs them to the control plane on a 5s
-// flush tick (cmd/agentcc/main.go), so a row lands after its call returns.
+// Ingestion is synchronous, but the poll keeps a slow runner from flaking.
 const LOG_VISIBLE = POLL.ASYNC_JOB;
 // Browser-side waits, sized like the other flows: the local stack slows
 // several-fold when specs run in parallel.
@@ -43,13 +52,13 @@ test(
         'A platform engineer finds the gateway requests one application made, out of everything the org sent',
       steps: [
         'mint a gateway API key from the app',
-        'send three chat completions through the gateway, each tagged with an application, a service and a team',
+        'deliver three gateway requests on the logs webhook, each tagged with an application, a service and a team',
         'open Request Logs',
         'pick one application in the Filters panel and apply it',
         'read the filtered table',
       ],
       backendChecks: [
-        'each call stored in PG agentcc_request_log with the caller metadata the gateway received',
+        'each request stored in PG agentcc_request_log under the key\'s org with the caller metadata the gateway parsed',
         'the list endpoint returns only the rows of the filtered application',
         'two applications in one filter return both, a service filter and a team tag filter narrow the same way',
         'metadata-values offers exactly the two applications the org sent',
@@ -59,9 +68,9 @@ test(
     }),
   },
   async ({ page, actor, probe }, testInfo) => {
-    // Three gateway calls on a 5s flush tick, then navigation and two UI waits:
-    // past the config's 120s default, so a slow run ends on the assertion that
-    // ran out rather than a bare timeout.
+    // Ingestion, then navigation and two UI waits: past the config's 120s
+    // default, so a slow run ends on the assertion that ran out rather than a
+    // bare timeout.
     test.setTimeout(240_000);
     const req = await request.newContext();
     const suffix = `${testInfo.workerIndex}-${Date.now().toString(36)}`;
@@ -69,34 +78,43 @@ test(
     const search = `e2e-search-${suffix}`;
     const team = `e2e-team-${suffix}`;
 
-    const created = await actor.api.post<{ result: { key: string } }>(
+    const created = await actor.api.post<{ result: { gateway_key_id: string } }>(
       '/agentcc/api-keys/',
       { name: `e2e-gw-${suffix}` },
     );
-    const gatewayKey = created.result.key;
+    const gatewayKeyId = created.result.gateway_key_id;
 
-    const call = async (application: string, service: string) => {
-      const res = await req.post(`${E2E.gatewayUrl}/v1/chat/completions`, {
-        headers: {
-          Authorization: `Bearer ${gatewayKey}`,
-          [METADATA_HEADER]: JSON.stringify({ application, service, team }),
-        },
+    const deliver = async (application: string, service: string, index: number) => {
+      const res = await req.post(`${E2E.apiUrl}${LOGS_WEBHOOK_PATH}`, {
+        headers: { 'X-Webhook-Secret': WEBHOOK_SECRET },
         data: {
-          model: 'gpt-4o-mini',
-          messages: [{ role: 'user', content: `ping ${application}` }],
+          logs: [
+            {
+              request_id: `e2e-gw-${suffix}-${index}`,
+              auth_key_id: gatewayKeyId,
+              model: 'gpt-4o-mini',
+              provider: 'openai',
+              status_code: 200,
+              latency_ms: 120,
+              total_tokens: 42,
+              cost: '0.000420',
+              timestamp: new Date().toISOString(),
+              metadata: { application, service, team },
+            },
+          ],
         },
       });
       expect(res.status(), await res.text()).toBe(200);
     };
 
-    await call(checkout, 'recommendations');
-    await call(checkout, 'fraud-check');
-    await call(search, 'answer');
+    await deliver(checkout, 'recommendations', 1);
+    await deliver(checkout, 'fraud-check', 2);
+    await deliver(search, 'answer', 3);
 
     const listFor = (params: Record<string, string | number>) =>
       actor.api.get<Paginated<RequestLogRow>>(REQUEST_LOGS_PATH, params);
 
-    await test.step('API: each call is stored under the application it named', async () => {
+    await test.step('API: each request is stored under the application it named', async () => {
       await expect
         .poll(async () => (await listFor({ application: checkout })).count, LOG_VISIBLE)
         .toBe(2);

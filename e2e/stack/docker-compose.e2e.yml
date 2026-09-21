@@ -9,13 +9,6 @@ services:
       # Request logs reach Django over this shared secret; without it the
       # webhook rejects every batch the gateway sends.
       AGENTCC_WEBHOOK_SECRET: ${AGENTCC_WEBHOOK_SECRET:-e2e-agentcc-webhook-secret}
-  agentcc-gateway:
-    environment:
-      # The gateway only flushes request logs once it knows a control plane to
-      # post them to. Config sync stays off (no sync_on_startup, no interval),
-      # so the stack still serves the keys and providers in gateway.e2e.yaml.
-      AGENTCC_CONTROL_PLANE_URL: http://backend:80
-      AGENTCC_WEBHOOK_SECRET: ${AGENTCC_WEBHOOK_SECRET:-e2e-agentcc-webhook-secret}
   worker:
     restart: "no"
   fi-collector:
