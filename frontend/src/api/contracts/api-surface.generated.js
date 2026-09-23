@@ -5,7 +5,7 @@
 export const API_SURFACE_CONTRACT = Object.freeze({
   generatedFrom: "api_contracts/openapi/swagger.json",
   swaggerVersion: "2.0",
-  endpointCount: 1005,
+  endpointCount: 1009,
   groups: {
     accounts: {
       "/accounts/2fa/recovery-codes/": ["get"],
@@ -1030,6 +1030,10 @@ export const API_SURFACE_CONTRACT = Object.freeze({
       "/tracer/feed/issues/{cluster_id}/trends/": ["get"],
       "/tracer/get-annotation-labels/": ["get"],
       "/tracer/imagine-analysis/": ["get", "post"],
+      "/tracer/internal/error-feed-v2/attempts/{attempt_id}/": ["patch"],
+      "/tracer/internal/error-feed-v2/claims/": ["post"],
+      "/tracer/internal/error-feed-v2/notifications/": ["post"],
+      "/tracer/internal/error-feed-v2/reports/": ["post"],
       "/tracer/observability-provider/": ["get", "post"],
       "/tracer/observability-provider/verify_api_key/": ["post"],
       "/tracer/observability-provider/verify_assistant_id/": ["post"],
@@ -2206,6 +2210,10 @@ export const API_SURFACE_PATHS = Object.freeze({
   "/tracer/feed/issues/{cluster_id}/trends/": ["get"],
   "/tracer/get-annotation-labels/": ["get"],
   "/tracer/imagine-analysis/": ["get", "post"],
+  "/tracer/internal/error-feed-v2/attempts/{attempt_id}/": ["patch"],
+  "/tracer/internal/error-feed-v2/claims/": ["post"],
+  "/tracer/internal/error-feed-v2/notifications/": ["post"],
+  "/tracer/internal/error-feed-v2/reports/": ["post"],
   "/tracer/observability-provider/": ["get", "post"],
   "/tracer/observability-provider/verify_api_key/": ["post"],
   "/tracer/observability-provider/verify_assistant_id/": ["post"],
