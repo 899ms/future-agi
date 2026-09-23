@@ -108458,6 +108458,11 @@ export const OPENAPI_CONTRACT = Object.freeze({
           },
           maxItems: 100,
         },
+        explanation: {
+          title: "Explanation",
+          type: "string",
+          maxLength: 600,
+        },
       },
     },
     AgentPromptOptimiserComponentEvalResult: {

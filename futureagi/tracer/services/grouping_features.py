@@ -16,10 +16,11 @@ from tracer.models.trace_grouping import (
     TraceGroupingScope,
 )
 from tracer.models.trace_investigation import (
-    TraceInvestigationFinding,
     TraceInvestigationReport,
     TraceInvestigationSource,
 )
+from tracer.queries.grouping import groupable_findings
+from tracer.services.grouping.control import _eligible_project
 
 
 def enqueue_grouping_features(
@@ -32,12 +33,8 @@ def enqueue_grouping_features(
     Retries retain the existing row/deadline; failed or historical reports never
     provide ordinary clustering input. No membership or public Feed data changes.
     """
-    if not getattr(settings, "ERROR_FEED_GROUPING_ENABLED", False):
+    if not _eligible_project(report.project_id):
         return None
-    if not getattr(settings, "ERROR_FEED_GROUPING_ALL_PROJECTS", False):
-        projects = getattr(settings, "ERROR_FEED_GROUPING_PROJECT_IDS", ())
-        if str(report.project_id) not in projects:
-            return None
     with transaction.atomic():
         # Refresh the authoritative row: callers must not enqueue an old Python
         # object after a concurrent replacement has made its report non-current.
@@ -59,9 +56,7 @@ def enqueue_grouping_features(
         )
         if current.execution_status != "completed":
             return None
-        if not TraceInvestigationFinding.no_workspace_objects.filter(
-            report=current
-        ).exists():
+        if not groupable_findings(current).exists():
             return None
         job, _ = TraceGroupingFeatureJob.no_workspace_objects.get_or_create(
             report=current,
