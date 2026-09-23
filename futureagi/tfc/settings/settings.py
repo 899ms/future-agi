@@ -900,6 +900,11 @@ VAPI_WEBHOOK_SECRET = os.getenv("VAPI_WEBHOOK_SECRET", "")
 
 # Internal API authentication (shared secret for service-to-service calls)
 INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET", "")
+ERROR_FEED_OMEGA_DELAY_SECONDS = int(os.getenv("ERROR_FEED_OMEGA_DELAY_SECONDS", "60"))
+ERROR_FEED_OMEGA_LEASE_SECONDS = int(os.getenv("ERROR_FEED_OMEGA_LEASE_SECONDS", "120"))
+ERROR_FEED_OMEGA_PROJECT_CONCURRENCY = int(
+    os.getenv("ERROR_FEED_OMEGA_PROJECT_CONCURRENCY", "2")
+)
 
 # Hosted ALK sandbox gateway
 HARNESS_PUBLIC_BASE_URL = os.getenv("HARNESS_PUBLIC_BASE_URL", "")
