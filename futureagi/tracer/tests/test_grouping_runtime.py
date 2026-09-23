@@ -33,6 +33,8 @@ from tracer.queries.grouping import (
 from tracer.services.grouping import context
 from tracer.services.grouping.accounting import reserve_call, settle_call
 from tracer.services.grouping.control import (
+    MAX_CHECKPOINT_BYTES,
+    GroupingControlError,
     GroupingConflict,
     checkpoint_attempt,
     claim_feature_jobs,
@@ -47,6 +49,7 @@ from tracer.services.grouping.feature_completion import (
 from tracer.services.grouping.lifecycle import deproject_superseded_report
 from tracer.services.grouping.publish import (
     _admitted_group,
+    _mechanism,
     _new_issue,
     publish_grouping,
 )
@@ -54,6 +57,37 @@ from tracer.services.grouping_features import enqueue_grouping_features
 from tracer.tests.test_grouping_snapshot import _saved_report
 
 pytestmark = pytest.mark.django_db
+
+
+def test_concise_title_keeps_full_mechanism(observe_project):
+    report = _saved_report(observe_project)
+    scope = TraceGroupingScope.no_workspace_objects.create(
+        organization_id=report.organization_id,
+        workspace_id=report.workspace_id,
+        project_id=report.project_id,
+    )
+    mechanism = {
+        "title": "Identical categories receive inconsistent icons",
+        "mechanism": "The agent assigns different icon tags to questions with identical category titles because it does not preserve the title-to-icon mapping across the generated array.",
+        "fix_hypothesis": "Reuse the icon selected for each category title",
+        "falsifier": "All questions with an identical title use the same icon",
+    }
+    state = _new_issue(scope, _mechanism(mechanism), [str(report.findings.get().id)])
+    assert state.cluster.title == mechanism["title"]
+    assert state.cluster.combined_description == mechanism["mechanism"]
+    assert state.mechanism == mechanism
+
+
+def test_long_model_title_is_rejected():
+    with pytest.raises(GroupingControlError, match="concise headline"):
+        _mechanism(
+            {
+                "title": "word " * 13,
+                "mechanism": "failure",
+                "fix_hypothesis": "fix",
+                "falsifier": "proof",
+            }
+        )
 
 
 class FakeFeatureStore:
@@ -163,6 +197,32 @@ def test_reclaim_does_not_reopen_completed_cohort_peer(observe_project, monkeypa
     ] == [str(first_report.id)]
     completed.refresh_from_db()
     assert completed.state == "completed"
+
+
+@override_settings(
+    ERROR_FEED_GROUPING_ENABLED=True,
+    ERROR_FEED_GROUPING_ALL_PROJECTS=True,
+    ERROR_FEED_GROUPING_DEBOUNCE_SECONDS=0,
+    ERROR_FEED_GROUPING_PROJECT_BUDGET_USD="10",
+    ERROR_FEED_GROUPING_WORK_BUDGET_USD="10",
+    ERROR_FEED_GROUPING_TENANT_BUDGET_USD="10",
+)
+def test_checkpoint_bound_matches_grouping_transport(observe_project, monkeypatch):
+    _, claim = _claimed_runtime(observe_project, monkeypatch)
+    common = {
+        "attempt_id": uuid.UUID(claim["attempt_id"]),
+        "lease_token": claim["lease_token"],
+        "expected_revision": 0,
+    }
+    accepted = checkpoint_attempt(
+        **common, checkpoint={"files": {"checkpoint.json": "x" * (6 * 1024 * 1024)}}
+    )
+    assert accepted["checkpoint_revision"] == 1
+    with pytest.raises(GroupingControlError, match="bounded object"):
+        checkpoint_attempt(
+            **{**common, "expected_revision": 1},
+            checkpoint={"files": {"checkpoint.json": "x" * MAX_CHECKPOINT_BYTES}},
+        )
 
 
 @override_settings(
