@@ -205,14 +205,16 @@ def test_f6_reel_uses_only_evidence_linked_to_selected_issue(omega_issue):
         cluster=other_cluster, trace_id=report.trace_id, finding=other_finding
     )
 
-    selected = feed._cluster_evidence_by_trace(
+    selected = feed._cluster_findings_by_trace(
         cluster.cluster_id, str(cluster.project_id), [str(report.trace_id)]
     )
-    reel = feed._investigation_reel(
-        report, selected_receipts=selected[str(report.trace_id)]
-    )
+    selected_findings = selected[str(report.trace_id)]
+    assert [item.id for item, _citations in selected_findings] == [finding.id]
+    reel = feed._omega_findings_to_reel(selected_findings, [])
 
-    assert [step["raw"] for step in reel] == ["requested=100; executed=10"]
+    assert [step["label"] for step in reel] == ["FINDING", "DECISIVE"]
+    assert [step["raw"] for step in reel] == ["requested=100; executed=10"] * 2
+    assert {step["evidence_id"] for step in reel} == {"evidence-1"}
     assert finding.id != other_finding.id
 
 
@@ -313,6 +315,33 @@ def test_feed_human_edits_fence_f6_but_leave_legacy_updates_alone(omega_issue, u
     assert scope.registry_revision == old_registry + 2
 
 
+def test_repeated_severity_edit_does_not_churn_f6_versions(omega_issue, user):
+    _report, cluster, state, _finding = omega_issue
+    scope = state.scope
+    payload = FeedUpdatePayload(
+        status=FeedIssueStatus.ACKNOWLEDGED,
+        severity="high",
+        assignee=user.email,
+        assignee_provided=True,
+    )
+    with patch.object(feed, "get_cluster_detail", return_value="detail"):
+        feed.update_cluster(cluster.cluster_id, [str(cluster.project_id)], payload)
+        state.refresh_from_db()
+        scope.refresh_from_db()
+        first_revision = state.revision
+        first_registry_revision = scope.registry_revision
+
+        feed.update_cluster(cluster.cluster_id, [str(cluster.project_id)], payload)
+
+    cluster.refresh_from_db()
+    state.refresh_from_db()
+    scope.refresh_from_db()
+    assert cluster.priority == Priority.HIGH
+    assert state.protected is True
+    assert state.revision == first_revision
+    assert scope.registry_revision == first_registry_revision
+
+
 def test_linear_link_protects_f6_before_mocked_external_call(
     omega_issue, user, monkeypatch
 ):
@@ -374,7 +403,7 @@ def test_legacy_scanner_writers_cannot_retitle_or_join_f6_issue(omega_issue):
         scan_clustering._refresh_severity(cluster)
     embed.assert_not_called()
     severity.assert_not_called()
-    with pytest.raises(ValueError, match="F6-owned"):
+    with pytest.raises(ValueError, match="Omega-owned"):
         scan_clustering.assign_to_cluster(
             cluster.cluster_id, str(cluster.project_id), None, []
         )

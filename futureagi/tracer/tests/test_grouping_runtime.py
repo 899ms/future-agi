@@ -7,6 +7,7 @@ from decimal import Decimal
 
 import pytest
 from django.test import override_settings
+from django.utils import timezone
 
 from tracer.constants.grouping_versions import FEATURE_POLICY_VERSION
 from tracer.models.trace_error_analysis import ErrorClusterTraces
@@ -32,6 +33,8 @@ from tracer.queries.grouping import (
 from tracer.services.grouping import context
 from tracer.services.grouping.accounting import reserve_call, settle_call
 from tracer.services.grouping.control import (
+    MAX_CHECKPOINT_BYTES,
+    GroupingControlError,
     GroupingConflict,
     checkpoint_attempt,
     claim_feature_jobs,
@@ -46,6 +49,7 @@ from tracer.services.grouping.feature_completion import (
 from tracer.services.grouping.lifecycle import deproject_superseded_report
 from tracer.services.grouping.publish import (
     _admitted_group,
+    _mechanism,
     _new_issue,
     publish_grouping,
 )
@@ -53,6 +57,37 @@ from tracer.services.grouping_features import enqueue_grouping_features
 from tracer.tests.test_grouping_snapshot import _saved_report
 
 pytestmark = pytest.mark.django_db
+
+
+def test_concise_title_keeps_full_mechanism(observe_project):
+    report = _saved_report(observe_project)
+    scope = TraceGroupingScope.no_workspace_objects.create(
+        organization_id=report.organization_id,
+        workspace_id=report.workspace_id,
+        project_id=report.project_id,
+    )
+    mechanism = {
+        "title": "Identical categories receive inconsistent icons",
+        "mechanism": "The agent assigns different icon tags to questions with identical category titles because it does not preserve the title-to-icon mapping across the generated array.",
+        "fix_hypothesis": "Reuse the icon selected for each category title",
+        "falsifier": "All questions with an identical title use the same icon",
+    }
+    state = _new_issue(scope, _mechanism(mechanism), [str(report.findings.get().id)])
+    assert state.cluster.title == mechanism["title"]
+    assert state.cluster.combined_description == mechanism["mechanism"]
+    assert state.mechanism == mechanism
+
+
+def test_long_model_title_is_rejected():
+    with pytest.raises(GroupingControlError, match="concise headline"):
+        _mechanism(
+            {
+                "title": "word " * 13,
+                "mechanism": "failure",
+                "fix_hypothesis": "fix",
+                "falsifier": "proof",
+            }
+        )
 
 
 class FakeFeatureStore:
@@ -102,7 +137,13 @@ def _feature_rows(snapshot):
 
 
 def _claimed_runtime(project, monkeypatch):
-    report = _saved_report(project)
+    report = _prepare_runtime(project, monkeypatch)
+    claim = claim_grouping_work(worker_id="test-f6-worker", limit=1)["claims"][0]
+    return report, claim
+
+
+def _prepare_runtime(project, monkeypatch, *, identity=None):
+    report = _saved_report(project, identity=identity)
     job = enqueue_grouping_features(report=report)
     assert job.policy_version == FEATURE_POLICY_VERSION
     feature_claim = claim_feature_jobs(worker_id="test-feature-worker", limit=1)[
@@ -118,14 +159,79 @@ def _claimed_runtime(project, monkeypatch):
     )
     assert prepared["state"] == "ready"
     monkeypatch.setattr(context, "GroupingFeatureStore", FakeFeatureStore)
-    claim = claim_grouping_work(worker_id="test-f6-worker", limit=1)["claims"][0]
-    return report, claim
+    return report
 
 
 @override_settings(
     ERROR_FEED_GROUPING_ENABLED=True,
     ERROR_FEED_GROUPING_ALL_PROJECTS=True,
     ERROR_FEED_GROUPING_DEBOUNCE_SECONDS=0,
+    ERROR_FEED_GROUPING_PROJECT_BUDGET_USD="10",
+    ERROR_FEED_GROUPING_WORK_BUDGET_USD="10",
+    ERROR_FEED_GROUPING_TENANT_BUDGET_USD="10",
+)
+def test_reclaim_does_not_reopen_completed_cohort_peer(observe_project, monkeypatch):
+    first_report = _prepare_runtime(observe_project, monkeypatch, identity="first")
+    second_report = _prepare_runtime(observe_project, monkeypatch, identity="second")
+
+    first_claim = claim_grouping_work(worker_id="test-f6-worker", limit=1)["claims"][0]
+    assert len(first_claim["pending_snapshots"]) == 2
+    update_grouping_attempt(
+        attempt_id=uuid.UUID(first_claim["attempt_id"]),
+        lease_token=first_claim["lease_token"],
+        action="cancel",
+    )
+    TraceGroupingWork.no_workspace_objects.filter(report=first_report).update(
+        not_before=timezone.now()
+    )
+
+    completed = TraceGroupingWork.no_workspace_objects.get(report=second_report)
+    completed.state = "completed"
+    completed.save(update_fields=["state", "updated_at"])
+
+    second_claim = claim_grouping_work(worker_id="test-f6-worker", limit=1)["claims"][0]
+
+    assert [
+        snapshot["report"]["id"]
+        for snapshot in second_claim["pending_snapshots"]
+    ] == [str(first_report.id)]
+    completed.refresh_from_db()
+    assert completed.state == "completed"
+
+
+@override_settings(
+    ERROR_FEED_GROUPING_ENABLED=True,
+    ERROR_FEED_GROUPING_ALL_PROJECTS=True,
+    ERROR_FEED_GROUPING_DEBOUNCE_SECONDS=0,
+    ERROR_FEED_GROUPING_PROJECT_BUDGET_USD="10",
+    ERROR_FEED_GROUPING_WORK_BUDGET_USD="10",
+    ERROR_FEED_GROUPING_TENANT_BUDGET_USD="10",
+)
+def test_checkpoint_bound_matches_grouping_transport(observe_project, monkeypatch):
+    _, claim = _claimed_runtime(observe_project, monkeypatch)
+    common = {
+        "attempt_id": uuid.UUID(claim["attempt_id"]),
+        "lease_token": claim["lease_token"],
+        "expected_revision": 0,
+    }
+    accepted = checkpoint_attempt(
+        **common, checkpoint={"files": {"checkpoint.json": "x" * (6 * 1024 * 1024)}}
+    )
+    assert accepted["checkpoint_revision"] == 1
+    with pytest.raises(GroupingControlError, match="bounded object"):
+        checkpoint_attempt(
+            **{**common, "expected_revision": 1},
+            checkpoint={"files": {"checkpoint.json": "x" * MAX_CHECKPOINT_BYTES}},
+        )
+
+
+@override_settings(
+    ERROR_FEED_GROUPING_ENABLED=True,
+    ERROR_FEED_GROUPING_ALL_PROJECTS=True,
+    ERROR_FEED_GROUPING_DEBOUNCE_SECONDS=0,
+    ERROR_FEED_GROUPING_PROJECT_BUDGET_USD="10",
+    ERROR_FEED_GROUPING_WORK_BUDGET_USD="10",
+    ERROR_FEED_GROUPING_TENANT_BUDGET_USD="10",
 )
 def test_feature_claim_to_bounded_grouping_claim_and_defer(
     observe_project, monkeypatch
@@ -187,6 +293,9 @@ def test_feature_claim_to_bounded_grouping_claim_and_defer(
     ERROR_FEED_GROUPING_ENABLED=True,
     ERROR_FEED_GROUPING_ALL_PROJECTS=True,
     ERROR_FEED_GROUPING_DEBOUNCE_SECONDS=0,
+    ERROR_FEED_GROUPING_PROJECT_BUDGET_USD="10",
+    ERROR_FEED_GROUPING_WORK_BUDGET_USD="10",
+    ERROR_FEED_GROUPING_TENANT_BUDGET_USD="10",
 )
 def test_raw_receipt_group_binds_create_and_junction(observe_project, monkeypatch):
     report, claim = _claimed_runtime(observe_project, monkeypatch)
@@ -303,6 +412,8 @@ def test_raw_receipt_group_binds_create_and_junction(observe_project, monkeypatc
     assert result["assigned"] == 1
     finding.refresh_from_db()
     assert finding.cluster_id == uuid.UUID(result["created_issue_ids"]["new-f6-issue"])
+    assert finding.cluster.cluster_id.startswith("S-")
+    assert len(finding.cluster.cluster_id) == 10
     membership = ErrorClusterTraces.no_workspace_objects.get(
         finding=finding, deleted=False
     )
