@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.41.0](https://github.com/future-agi/future-agi/compare/v1.40.1...v1.41.0) (2026-09-25)
+
+
+### Features
+
+* **error-feed:** include source names in worker claims ([7e3f852](https://github.com/future-agi/future-agi/commit/7e3f85218873d293919ec301731df59b585335d8))
+* **error-feed:** include source names in worker claims ([c660166](https://github.com/future-agi/future-agi/commit/c6601663ba3aa58b486fadde5979a80c89c0df43))
+
+
+### Bug Fixes
+
+* **tracer:** batched backfill_legacy_scans command replacing 0101 data step ([d6b96fc](https://github.com/future-agi/future-agi/commit/d6b96fc0ef3060f98836f57b12524061429e3c89))
+* **tracer:** batched backfill_legacy_scans command replacing 0101 data step (main) ([a540abf](https://github.com/future-agi/future-agi/commit/a540abf87375244b0236211e356ccc6fc28d8ef7))
+
 ## [1.40.1](https://github.com/future-agi/future-agi/compare/v1.40.0...v1.40.1) (2026-09-24)
 
 
