@@ -105032,7 +105032,15 @@ export const OPENAPI_CONTRACT = Object.freeze({
       "x-nullable": true,
     },
     SetupCheck: {
-      required: ["id", "label", "status", "required", "detail"],
+      required: [
+        "id",
+        "label",
+        "status",
+        "required",
+        "detail",
+        "fix",
+        "docs_url",
+      ],
       type: "object",
       properties: {
         id: {
@@ -105056,6 +105064,14 @@ export const OPENAPI_CONTRACT = Object.freeze({
         },
         detail: {
           title: "Detail",
+          type: "string",
+        },
+        fix: {
+          title: "Fix",
+          type: "string",
+        },
+        docs_url: {
+          title: "Docs url",
           type: "string",
         },
       },
