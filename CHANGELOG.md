@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.41.1](https://github.com/future-agi/future-agi/compare/v1.41.0...v1.41.1) (2026-09-25)
+
+
+### Bug Fixes
+
+* **frontend:** point get-started experiment links at develop and drop unused route imports ([8fd831e](https://github.com/future-agi/future-agi/commit/8fd831e8b2e3febe1f67489c65850a2d9ef7cf51))
+* **frontend:** retire the prototype routes and repoint get-started links ([e7112f2](https://github.com/future-agi/future-agi/commit/e7112f23f8b4354bb0dd6df854e9a041d425550c))
+* **oss:** explain failed pre-flight checks and keep the launch moving ([5d11782](https://github.com/future-agi/future-agi/commit/5d117826660b3e3a1947fdcbc5156b8cc98e9733))
+* **oss:** explain failed pre-flight checks and keep the launch moving ([83a7e63](https://github.com/future-agi/future-agi/commit/83a7e631a580768707e0021dd259d3f8a2010b62))
+* **self-host:** pin a frozen build of the last community MinIO release ([43026bd](https://github.com/future-agi/future-agi/commit/43026bd5d49dc26d1a7c192d198f394f6057203f))
+* **self-host:** pin a frozen build of the last community MinIO release ([871165b](https://github.com/future-agi/future-agi/commit/871165bbf79c61d6cee7377ba65b3b2d513f1096))
+
 ## [1.41.0](https://github.com/future-agi/future-agi/compare/v1.40.1...v1.41.0) (2026-09-25)
 
 
